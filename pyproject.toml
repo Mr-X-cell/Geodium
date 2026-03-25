@@ -1,0 +1,20 @@
+[build-system]
+requires =["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "geodium"
+version = "0.1.0"
+description = "A high-throughput, zero-allocation geospatial math engine. The Sodium of Earth Observation."
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies =[
+    "numpy",
+    "rasterio",
+    "spyndex"
+]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "geodium.geodium"
