@@ -9,7 +9,11 @@ name = "geodium"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.22", features = ["extension-module"] }
-numpy = "0.22"
-ndarray = "0.15"
+# pyo3 0.21+ uses the Bound API for better safety and performance
+pyo3 = { version = "0.21", features = ["extension-module"] }
+# numpy must be aligned with pyo3 version
+numpy = "0.21"
+# rayon feature in ndarray is required for .par_for_each and .into_par_iter
+ndarray = { version = "0.15", features = ["rayon"] }
 rayon = "1.8"
+num_cpus = "1.16"
