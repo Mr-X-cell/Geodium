@@ -1,8 +1,24 @@
 import numpy as np
-import rasterio
 import geodium
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+
+# -------------------------------------------------------------------------
+# Optional Dependency Guard
+# -------------------------------------------------------------------------
+try:
+    import rasterio
+    HAS_RASTERIO = True
+except ImportError:
+    HAS_RASTERIO = False
+
+def _require_rasterio():
+    if not HAS_RASTERIO:
+        raise ImportError(
+            "The 'rasterio' library is required to execute lazy graphs to disk. "
+            "Install it via: pip install rasterio (or pip install geodium[io])"
+        )
+# -------------------------------------------------------------------------
 
 # Helper to ensure numbers become LazyScalars
 def _wrap(val):
@@ -43,12 +59,10 @@ class LazyBand(LazyNode):
         self.key = f"{self.filepath}:{self.band_idx}"
 
     def compile_graph(self, state: dict):
-        # Register the file/band requirement uniquely
         if self.key not in state["unique_bands"]:
             state["unique_bands"].append(self.key)
             state["band_sources"].append((self.filepath, self.band_idx))
         
-        # Emit the instruction pointing to the correct array index
         idx = state["unique_bands"].index(self.key)
         state["instructions"].append({"type": "push_band", "index": idx})
 
@@ -66,7 +80,6 @@ class LazyBinOp(LazyNode):
         self.right = right
 
     def compile_graph(self, state: dict):
-        # Post-order traversal: Left, then Right, then Operator
         self.left.compile_graph(state)
         self.right.compile_graph(state)
         state["instructions"].append({"type": self.op})
@@ -79,28 +92,25 @@ class LazyUnaryOp(LazyNode):
     def compile_graph(self, state: dict):
         self.operand.compile_graph(state)
         state["instructions"].append({"type": self.op})
+
 def execute_lazy_graph(root_node: LazyNode, output_path: str, tile_size: int = 4096):
-    """Compiles the lazy tree to Rust Bytecode and executes the double-buffered pipeline."""
+    _require_rasterio() # Guard against missing optional dependencies!
     
-    # 1. Walk the tree to build the Bytecode and figure out which files we need
     state = {
         "instructions":[],
         "unique_bands": [],
-        "band_sources":[] # List of tuples: (filepath, band_idx)
+        "band_sources":[] 
     }
     root_node.compile_graph(state)
     
     num_bands = len(state["band_sources"])
     print(f"Compiled Lazy Graph: {len(state['instructions'])} instructions, reading {num_bands} unique bands.")
     
-    # 2. Compile into the Rust Virtual Machine handle
     compiled_expr = geodium.compile_expr(state["instructions"], num_bands)
     
-    # 3. Open all required TIFF files
-    srcs =[rasterio.open(fp) for fp, _ in state["band_sources"]]
-    band_indices =[b_idx for _, b_idx in state["band_sources"]]
+    srcs = [rasterio.open(fp) for fp, _ in state["band_sources"]]
+    band_indices = [b_idx for _, b_idx in state["band_sources"]]
     
-    # Validate geometry matches
     base_shape = srcs[0].shape
     for src in srcs:
         if src.shape != base_shape:
@@ -111,15 +121,13 @@ def execute_lazy_graph(root_node: LazyNode, output_path: str, tile_size: int = 4
     profile.update(dtype='float32', count=1, compress='lzw', predictor=3, tiled=True, blockxsize=256, blockysize=256)
     windows = [w for _, w in srcs[0].block_windows(1)]
 
-    # 4. The Double-Buffered ThreadPool Pipeline
-    buffers =[
+    buffers = [
         np.zeros((tile_size, tile_size), dtype=np.float32, order='C'),
         np.zeros((tile_size, tile_size), dtype=np.float32, order='C')
     ]
 
     def read_fn(window):
-        # Reads only the required band from each open TIFF
-        return[src.read(b_idx, window=window, out_dtype='uint16') for src, b_idx in zip(srcs, band_indices)], window
+        return [src.read(b_idx, window=window, out_dtype='uint16') for src, b_idx in zip(srcs, band_indices)], window
 
     with rasterio.open(output_path, 'w', **profile) as dst:
         with ThreadPoolExecutor(max_workers=num_bands + 1) as io_pool:
@@ -136,7 +144,6 @@ def execute_lazy_graph(root_node: LazyNode, output_path: str, tile_size: int = 4
                 th, tw = tiles[0].shape
                 active_buf = buffers[buffer_idx][:th, :tw]
 
-                # 5. EXECUTE THE RUST VM
                 geodium.execute_expr_inplace(compiled_expr, tiles, active_buf)
 
                 if future_write is not None:
@@ -148,7 +155,6 @@ def execute_lazy_graph(root_node: LazyNode, output_path: str, tile_size: int = 4
             if future_write is not None:
                 future_write.result()
 
-    # Cleanup
     for src in srcs:
         src.close()
     print(f"Lazy Evaluation Complete. Saved to: {output_path}")
