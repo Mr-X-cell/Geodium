@@ -19,7 +19,5 @@ formulas = ["spyndex>=0.3.0"]
 all = ["rasterio>=1.3.0", "spyndex>=0.3.0"]
 
 [tool.maturin]
-# Tells maturin to look in the /geodium folder for Python files to bundle
-python-source = "geodium"
-# Binds the compiled Rust binary into the geodium python package as `geodium.geodium`
+python-source = "Geodium/python"
 module-name = "geodium.geodium"
