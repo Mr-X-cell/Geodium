@@ -6,7 +6,6 @@ name = "geodium"
 version = "0.1.6"
 description = "A high-throughput, zero-allocation geospatial math engine. The Sodium of Earth Observation."
 readme = "README.md"
-requires-python = ">=3.8, <3.14"    # <--- THIS IS THE FIX
 dependencies =[
     "numpy",
     "rasterio",
