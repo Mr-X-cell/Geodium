@@ -19,5 +19,5 @@ formulas = ["spyndex>=0.3.0"]
 all = ["rasterio>=1.3.0", "spyndex>=0.3.0"]
 
 [tool.maturin]
-python-source = "Geodium/python"
+python-source = "python"
 module-name = "geodium.geodium"
