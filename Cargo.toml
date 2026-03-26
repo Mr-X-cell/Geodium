@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # pyo3 0.21+ uses the Bound API for better safety and performance
-pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310", "generate-import-lib"] }
 numpy = "0.23" 
 # rayon feature in ndarray is required for .par_for_each and .into_par_iter
 ndarray = { version = "0.15", features = ["rayon"] }
