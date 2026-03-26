@@ -1,0 +1,1 @@
+A python library for quickly doing spectral imaging with less ram usage 
