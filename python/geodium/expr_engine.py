@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
-import geodium
+from . import geodium
 
 try:
     import spyndex

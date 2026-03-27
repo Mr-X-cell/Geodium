@@ -1,5 +1,5 @@
 import numpy as np
-import geodium
+from . import geodium
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 

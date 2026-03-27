@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import psutil
 import numpy as np
-import geodium
+from . import geodium
 import expr_engine
 
 from enum import Enum
