@@ -3,7 +3,7 @@ from __future__ import annotations
 import psutil
 import numpy as np
 from . import geodium
-import expr_engine
+from . import expr_engine
 
 from enum import Enum
 from pathlib import Path
