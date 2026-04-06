@@ -1,4 +1,4 @@
-A python library for quickly doing spectral imaging with less ram usage.
+A Geospatial python library for quickly doing spectral idices using less ram by leveraging Rust Zero Allocation bridges and Lazy loading math.
 There are 4 ways to use Geodium.
 
 # Method 1 Direct kernal usage (Fastest method)
