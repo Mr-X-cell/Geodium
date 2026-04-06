@@ -1,16 +1,12 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 use numpy::{PyArray2, PyArrayMethods, PyUntypedArrayMethods};
-use ndarray::{Axis, Zip};
-use rayon::prelude::*;
+use ndarray::Zip;
 use rayon::ThreadPoolBuilder;
-use std::sync::OnceLock;
 
 const EPSILON: f32 = 1e-10;
 
-static RECIPROCAL_LUT: OnceLock<Vec<f32>> = OnceLock::new();
-
-fn init_hardware_optimization() {
+fn init_rayon() {
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
@@ -18,196 +14,193 @@ fn init_hardware_optimization() {
     let _ = ThreadPoolBuilder::new()
         .num_threads(threads)
         .build_global();
+}
 
-    RECIPROCAL_LUT.get_or_init(|| {
-        (0u32..=131_070)
-            .map(|i| 1.0_f32 / (i as f32 + EPSILON))
-            .collect()
+fn check_shapes(shapes: &[&[usize]]) -> PyResult<()> {
+    if shapes.is_empty() { return Ok(()); }
+    let base = shapes[0];
+    for (i, s) in shapes.iter().enumerate().skip(1) {
+        if *s != base {
+            return Err(PyValueError::new_err(format!(
+                "Shape mismatch at index {i}: expected {base:?}, got {s:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Kernels
+// ---------------------------------------------------------------------------
+
+#[inline(always)]
+fn nd_kernel(a: u16, b: u16) -> f32 {
+    let fa = a as f32;
+    let fb = b as f32;
+    (fa - fb) / (fa + fb + EPSILON)
+}
+
+#[inline(always)]
+fn ratio_kernel(a: u16, b: u16) -> f32 {
+    (a as f32) / (b as f32 + EPSILON)
+}
+
+#[inline(always)]
+fn adjusted_diff_kernel(a: u16, b: u16, l: f32) -> f32 {
+    let fa = a as f32;
+    let fb = b as f32;
+    ((fa - fb) / (fa + fb + l + EPSILON)) * (1.0 + l)
+}
+
+#[inline(always)]
+fn evi_kernel(nir: u16, red: u16, blue: u16, g: f32, c1: f32, c2: f32, l: f32) -> f32 {
+    let n = nir as f32;
+    let r = red as f32;
+    let b = blue as f32;
+    g * ((n - r) / (n + c1 * r - c2 * b + l + EPSILON))
+}
+
+// ---------------------------------------------------------------------------
+// Inplace API
+// ---------------------------------------------------------------------------
+
+#[pyfunction]
+pub fn calculate_normalized_difference_inplace<'py>(
+    py: Python<'py>,
+    band_a: Bound<'py, PyArray2<u16>>,
+    band_b: Bound<'py, PyArray2<u16>>,
+    out_buffer: Bound<'py, PyArray2<f32>>,
+) -> PyResult<()> {
+    check_shapes(&[band_a.shape(), band_b.shape(), out_buffer.shape()])?;
+    let a_guard = band_a.readonly();
+    let b_guard = band_b.readonly();
+    let mut out_guard = out_buffer.readwrite();
+
+    let a_view = a_guard.as_array();
+    let b_view = b_guard.as_array();
+    let out_view = out_guard.as_array_mut();
+
+    py.allow_threads(move || {
+        Zip::from(out_view)
+            .and(a_view)
+            .and(b_view)
+            .par_for_each(|out, &a, &b| *out = nd_kernel(a, b));
     });
-}
-
-// ---------------------------------------------------------------------------
-// Shape validation
-// ---------------------------------------------------------------------------
-
-fn validate_shapes_inplace(a: &[usize], b: &[usize], out: &[usize]) -> PyResult<()> {
-    if a != b || a != out {
-        return Err(PyValueError::new_err(format!(
-            "Shape mismatch: band_a={a:?}, band_b={b:?}, out_buffer={out:?}. \
-             All arrays must have identical dimensions."
-        )));
-    }
     Ok(())
 }
 
-fn validate_shapes(a: &[usize], b: &[usize]) -> PyResult<()> {
-    if a != b {
-        return Err(PyValueError::new_err(format!(
-            "Shape mismatch: band_a={a:?}, band_b={b:?}. \
-             Input arrays must have identical dimensions."
-        )));
-    }
+#[pyfunction]
+pub fn calculate_ratio_inplace<'py>(
+    py: Python<'py>,
+    band_a: Bound<'py, PyArray2<u16>>,
+    band_b: Bound<'py, PyArray2<u16>>,
+    out_buffer: Bound<'py, PyArray2<f32>>,
+) -> PyResult<()> {
+    check_shapes(&[band_a.shape(), band_b.shape(), out_buffer.shape()])?;
+    let a_guard = band_a.readonly();
+    let b_guard = band_b.readonly();
+    let mut out_guard = out_buffer.readwrite();
+
+    let a_view = a_guard.as_array();
+    let b_view = b_guard.as_array();
+    let out_view = out_guard.as_array_mut();
+
+    py.allow_threads(move || {
+        Zip::from(out_view)
+            .and(a_view)
+            .and(b_view)
+            .par_for_each(|out, &a, &b| *out = ratio_kernel(a, b));
+    });
+    Ok(())
+}
+
+#[pyfunction]
+pub fn calculate_adjusted_difference_inplace<'py>(
+    py: Python<'py>,
+    band_a: Bound<'py, PyArray2<u16>>,
+    band_b: Bound<'py, PyArray2<u16>>,
+    l: f32,
+    out_buffer: Bound<'py, PyArray2<f32>>,
+) -> PyResult<()> {
+    check_shapes(&[band_a.shape(), band_b.shape(), out_buffer.shape()])?;
+    let a_guard = band_a.readonly();
+    let b_guard = band_b.readonly();
+    let mut out_guard = out_buffer.readwrite();
+
+    let a_view = a_guard.as_array();
+    let b_view = b_guard.as_array();
+    let out_view = out_guard.as_array_mut();
+
+    py.allow_threads(move || {
+        Zip::from(out_view)
+            .and(a_view)
+            .and(b_view)
+            .par_for_each(|out, &a, &b| *out = adjusted_diff_kernel(a, b, l));
+    });
+    Ok(())
+}
+
+#[pyfunction]
+pub fn calculate_evi_inplace<'py>(
+    py: Python<'py>,
+    nir: Bound<'py, PyArray2<u16>>,
+    red: Bound<'py, PyArray2<u16>>,
+    blue: Bound<'py, PyArray2<u16>>,
+    g: f32, c1: f32, c2: f32, l: f32,
+    out_buffer: Bound<'py, PyArray2<f32>>,
+) -> PyResult<()> {
+    check_shapes(&[nir.shape(), red.shape(), blue.shape(), out_buffer.shape()])?;
+    let n_guard = nir.readonly();
+    let r_guard = red.readonly();
+    let b_guard = blue.readonly();
+    let mut out_guard = out_buffer.readwrite();
+
+    let n_view = n_guard.as_array();
+    let r_view = r_guard.as_array();
+    let b_view = b_guard.as_array();
+    let out_view = out_guard.as_array_mut();
+
+    py.allow_threads(move || {
+        Zip::from(out_view)
+            .and(n_view)
+            .and(r_view)
+            .and(b_view)
+            .par_for_each(|out, &n, &r, &b| *out = evi_kernel(n, r, b, g, c1, c2, l));
+    });
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// Core compute kernels
+// Expression Engine
 // ---------------------------------------------------------------------------
 
-fn compute_logic(
-    a_arr: ndarray::ArrayView2<u16>,
-    b_arr: ndarray::ArrayView2<u16>,
-    mut out: ndarray::ArrayViewMut2<f32>,
-) {
-    if let (Some(a_s), Some(b_s), Some(o_s)) =
-        (a_arr.as_slice(), b_arr.as_slice(), out.as_slice_mut())
-    {
-        o_s.par_iter_mut()
-            .zip(a_s.par_iter())
-            .zip(b_s.par_iter())
-            .for_each(|((out_val, &a), &b)| {
-                let fa  = a as f32;
-                let fb  = b as f32;
-                let val = (fa - fb) / (fa + fb + EPSILON);
-                #[cfg(feature = "benchmark")]
-                { *out_val = std::hint::black_box(val); }
-                #[cfg(not(feature = "benchmark"))]
-                { *out_val = val; }
-            });
-    } else {
-        let chunk_size = (a_arr.nrows() / rayon::current_num_threads()).max(64);
-        out.axis_chunks_iter_mut(Axis(0), chunk_size)
-            .into_par_iter()
-            .zip(a_arr.axis_chunks_iter(Axis(0), chunk_size))
-            .zip(b_arr.axis_chunks_iter(Axis(0), chunk_size))
-            .for_each(|((mut o_c, a_c), b_c)| {
-                Zip::from(&mut o_c)
-                    .and(&a_c)
-                    .and(&b_c)
-                    .for_each(|o, &a, &b| {
-                        let fa  = a as f32;
-                        let fb  = b as f32;
-                        let val = (fa - fb) / (fa + fb + EPSILON);
-                        #[cfg(feature = "benchmark")]
-                        { *o = std::hint::black_box(val); }
-                        #[cfg(not(feature = "benchmark"))]
-                        { *o = val; }
-                    });
-            });
-    }
-}
-
-fn compute_logic_lut(
-    a_arr: ndarray::ArrayView2<u16>,
-    b_arr: ndarray::ArrayView2<u16>,
-    mut out: ndarray::ArrayViewMut2<f32>,
-) {
-    let lut = RECIPROCAL_LUT.get().expect(
-        "RECIPROCAL_LUT accessed before init_hardware_optimization() was called."
-    );
-
-    if let (Some(a_s), Some(b_s), Some(o_s)) =
-        (a_arr.as_slice(), b_arr.as_slice(), out.as_slice_mut())
-    {
-        o_s.par_iter_mut()
-            .zip(a_s.par_iter())
-            .zip(b_s.par_iter())
-            .for_each(|((out_val, &a), &b)| {
-                let sum  = a as usize + b as usize;
-                let diff = a as f32 - b as f32;
-                let val  = diff * lut[sum];
-                #[cfg(feature = "benchmark")]
-                { *out_val = std::hint::black_box(val); }
-                #[cfg(not(feature = "benchmark"))]
-                { *out_val = val; }
-            });
-    } else {
-        let chunk_size = (a_arr.nrows() / rayon::current_num_threads()).max(64);
-        out.axis_chunks_iter_mut(Axis(0), chunk_size)
-            .into_par_iter()
-            .zip(a_arr.axis_chunks_iter(Axis(0), chunk_size))
-            .zip(b_arr.axis_chunks_iter(Axis(0), chunk_size))
-            .for_each(|((mut o_c, a_c), b_c)| {
-                Zip::from(&mut o_c)
-                    .and(&a_c)
-                    .and(&b_c)
-                    .for_each(|o, &a, &b| {
-                        let sum  = a as usize + b as usize;
-                        let diff = a as f32 - b as f32;
-                        let val  = diff * lut[sum];
-                        #[cfg(feature = "benchmark")]
-                        { *o = std::hint::black_box(val); }
-                        #[cfg(not(feature = "benchmark"))]
-                        { *o = val; }
-                    });
-            });
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Stack-machine expression evaluator
-// ---------------------------------------------------------------------------
-
-const MAX_STACK_DEPTH: usize = 16;
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 enum Instruction {
-    PushBand(usize),
-    PushScalar(f32),
+    PushBand(usize), PushScalar(f32),
     Add, Sub, Mul, Div, Pow, Neg, Abs, Sqrt,
 }
 
 #[pyclass]
-struct CompiledExpr {
-    program:    Vec<Instruction>,
-    num_bands:  usize,
+pub struct CompiledExpr {
+    program: Vec<Instruction>,
+    num_bands: usize,
 }
 
 #[pyfunction]
 fn compile_expr(instructions: Vec<Bound<'_, PyAny>>, num_bands: usize) -> PyResult<CompiledExpr> {
     let mut program = Vec::with_capacity(instructions.len());
-
     for instr in &instructions {
         let kind: String = instr.get_item("type")?.extract()?;
-        let op = match kind.as_str() {
-            "push_band" => {
-                let idx: usize = instr.get_item("index")?.extract()?;
-                if idx >= num_bands {
-                    return Err(PyValueError::new_err(format!("Band index {idx} out of range.")));
-                }
-                Instruction::PushBand(idx)
-            }
+        program.push(match kind.as_str() {
+            "push_band" => Instruction::PushBand(instr.get_item("index")?.extract()?),
             "push_scalar" => Instruction::PushScalar(instr.get_item("value")?.extract()?),
-            "add"  => Instruction::Add,
-            "sub"  => Instruction::Sub,
-            "mul"  => Instruction::Mul,
-            "div"  => Instruction::Div,
-            "pow"  => Instruction::Pow,
-            "neg"  => Instruction::Neg,
-            "abs"  => Instruction::Abs,
-            "sqrt" => Instruction::Sqrt,
-            other  => return Err(PyValueError::new_err(format!("Unknown instruction: {other}"))),
-        };
-        program.push(op);
+            "add" => Instruction::Add, "sub" => Instruction::Sub,
+            "mul" => Instruction::Mul, "div" => Instruction::Div,
+            "pow" => Instruction::Pow, "neg" => Instruction::Neg,
+            "abs" => Instruction::Abs, "sqrt" => Instruction::Sqrt,
+            _ => return Err(PyValueError::new_err(format!("Unknown op: {kind}"))),
+        });
     }
-
-    let mut depth: isize = 0;
-    for (i, instr) in program.iter().enumerate() {
-        let delta: isize = match instr {
-            Instruction::PushBand(_) | Instruction::PushScalar(_) => 1,
-            Instruction::Add | Instruction::Sub |
-            Instruction::Mul | Instruction::Div | Instruction::Pow => -1,
-            Instruction::Neg | Instruction::Abs | Instruction::Sqrt => 0,
-        };
-        depth += delta;
-        if depth <= 0 && !matches!(instr, Instruction::PushBand(_) | Instruction::PushScalar(_)) {
-            return Err(PyValueError::new_err(format!("Stack underflow at instr {i}")));
-        }
-    }
-    if depth != 1 {
-        return Err(PyValueError::new_err("Expression incomplete."));
-    }
-
     Ok(CompiledExpr { program, num_bands })
 }
 
@@ -219,122 +212,41 @@ fn execute_expr_inplace<'py>(
     out_buffer: Bound<'py, PyArray2<f32>>,
 ) -> PyResult<()> {
     let expr_ref = expr.borrow();
+    if bands.len() != expr_ref.num_bands { return Err(PyValueError::new_err("Band count mismatch.")); }
+    
+    let band_guards: Vec<_> = bands.iter().map(|b| b.readonly()).collect();
+    let mut out_guard = out_buffer.readwrite();
 
-    if bands.len() != expr_ref.num_bands {
-        return Err(PyValueError::new_err("Band count mismatch."));
-    }
-
-    let out_shape = out_buffer.shape().to_vec();
-    for band in &bands {
-        if band.shape() != out_shape.as_slice() {
-            return Err(PyValueError::new_err("Shape mismatch."));
-        }
-    }
-
-    let read_guards: Vec<_> = bands.iter().map(|b| b.readonly()).collect();
-    let band_arrays: Vec<ndarray::ArrayView2<u16>> =
-        read_guards.iter().map(|g| g.as_array()).collect();
-
-    let mut out_write = out_buffer.readwrite();
-    let mut out_view = out_write.as_array_mut();
+    let band_views: Vec<_> = band_guards.iter().map(|g| g.as_array()).collect();
+    let out_view = out_guard.as_array_mut();
     let program = expr_ref.program.clone();
 
-    macro_rules! eval_pixel {
-        ($out_val:expr, $pixel_idx:expr, $band_slices:expr) => {{
-            let mut stack = [0.0f32; MAX_STACK_DEPTH];
-            let mut sp: usize = 0;
-            for instr in &program {
-                match instr {
-                    Instruction::PushBand(idx) => { stack[sp] = $band_slices[*idx][$pixel_idx] as f32; sp += 1; }
-                    Instruction::PushScalar(v) => { stack[sp] = *v; sp += 1; }
-                    Instruction::Add  => { sp -= 1; stack[sp - 1] += stack[sp]; }
-                    Instruction::Sub  => { sp -= 1; stack[sp - 1] -= stack[sp]; }
-                    Instruction::Mul  => { sp -= 1; stack[sp - 1] *= stack[sp]; }
-                    Instruction::Div  => { sp -= 1; stack[sp - 1] /= stack[sp] + EPSILON; }
-                    Instruction::Pow  => { sp -= 1; stack[sp - 1] = stack[sp - 1].powf(stack[sp]); }
-                    Instruction::Neg  => { stack[sp - 1] = -stack[sp - 1]; }
-                    Instruction::Abs  => { stack[sp - 1] = stack[sp - 1].abs(); }
-                    Instruction::Sqrt => { stack[sp - 1] = stack[sp - 1].sqrt(); }
-                }
-            }
-            let val = stack[0];
-            #[cfg(feature = "benchmark")] { $out_val = std::hint::black_box(val); }
-            #[cfg(not(feature = "benchmark"))] { $out_val = val; }
-        }};
-    }
-
-    let all_contiguous = out_view.is_standard_layout()
-        && band_arrays.iter().all(|a| a.is_standard_layout());
-
     py.allow_threads(move || {
-        if all_contiguous {
-            let o_s = out_view.into_slice().unwrap();
-            let band_slices: Vec<&[u16]> = band_arrays.iter().map(|a| a.as_slice().unwrap()).collect();
-
-            o_s.par_iter_mut().enumerate().for_each(|(i, out_val)| {
-                eval_pixel!(*out_val, i, band_slices);
+        // FIXED: Zip::indexed(view) is the correct starting associated function
+        Zip::indexed(out_view)
+            .par_for_each(|(r, c), out_val| {
+                let mut stack = [0.0f32; 16];
+                let mut sp = 0;
+                for instr in &program {
+                    match instr {
+                        Instruction::PushBand(i) => { 
+                            stack[sp] = band_views[*i][[r, c]] as f32; 
+                            sp += 1; 
+                        }
+                        Instruction::PushScalar(s) => { stack[sp] = *s; sp += 1; }
+                        Instruction::Add => { sp -= 1; stack[sp-1] += stack[sp]; }
+                        Instruction::Sub => { sp -= 1; stack[sp-1] -= stack[sp]; }
+                        Instruction::Mul => { sp -= 1; stack[sp-1] *= stack[sp]; }
+                        Instruction::Div => { sp -= 1; stack[sp-1] /= stack[sp] + EPSILON; }
+                        Instruction::Pow => { sp -= 1; stack[sp-1] = stack[sp-1].powf(stack[sp]); }
+                        Instruction::Neg => { stack[sp-1] = -stack[sp-1]; }
+                        Instruction::Abs => { stack[sp-1] = stack[sp-1].abs(); }
+                        Instruction::Sqrt => { stack[sp-1] = stack[sp-1].sqrt(); }
+                    }
+                }
+                *out_val = stack[0];
             });
-        } else {
-            let band_slices: Vec<Vec<u16>> = band_arrays.iter().map(|a| a.iter().copied().collect()).collect();
-            let b_refs: Vec<&[u16]> = band_slices.iter().map(|v| v.as_slice()).collect();
-            let chunk_size = (out_view.nrows() / rayon::current_num_threads()).max(64);
-            let ncols = out_view.ncols();
-
-            out_view.axis_chunks_iter_mut(Axis(0), chunk_size)
-                .into_par_iter()
-                .enumerate()
-                .for_each(|(chunk_idx, mut o_chunk)| {
-                    let row_offset = chunk_idx * chunk_size;
-                    Zip::indexed(&mut o_chunk).for_each(|(row, col), out_val| {
-                        let i = (row_offset + row) * ncols + col;
-                        eval_pixel!(*out_val, i, b_refs);
-                    });
-                });
-        }
     });
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Python-exposed functions
-// ---------------------------------------------------------------------------
-
-#[pyfunction]
-pub fn calculate_normalized_difference_inplace<'py>(
-    py: Python<'py>,
-    band_a: Bound<'py, PyArray2<u16>>,
-    band_b: Bound<'py, PyArray2<u16>>,
-    out_buffer: Bound<'py, PyArray2<f32>>,
-) -> PyResult<()> {
-    validate_shapes_inplace(band_a.shape(), band_b.shape(), out_buffer.shape())?;
-    let a_view = band_a.readonly();
-    let b_view = band_b.readonly();
-    let a_arr = a_view.as_array();
-    let b_arr = b_view.as_array();
-    let mut out_write = out_buffer.readwrite();
-    let out_view = out_write.as_array_mut();
-
-    py.allow_threads(move || compute_logic(a_arr, b_arr, out_view));
-    Ok(())
-}
-
-#[pyfunction]
-pub fn calculate_normalized_difference_lut_inplace<'py>(
-    py: Python<'py>,
-    band_a: Bound<'py, PyArray2<u16>>,
-    band_b: Bound<'py, PyArray2<u16>>,
-    out_buffer: Bound<'py, PyArray2<f32>>,
-) -> PyResult<()> {
-    validate_shapes_inplace(band_a.shape(), band_b.shape(), out_buffer.shape())?;
-    let a_view = band_a.readonly();
-    let b_view = band_b.readonly();
-    let a_arr = a_view.as_array();
-    let b_arr = b_view.as_array();
-    let mut out_write = out_buffer.readwrite();
-    let out_view = out_write.as_array_mut();
-
-    py.allow_threads(move || compute_logic_lut(a_arr, b_arr, out_view));
     Ok(())
 }
 
@@ -344,28 +256,20 @@ pub fn calculate_normalized_difference<'py>(
     band_a: Bound<'py, PyArray2<u16>>,
     band_b: Bound<'py, PyArray2<u16>>,
 ) -> PyResult<Bound<'py, PyArray2<f32>>> {
-    validate_shapes(band_a.shape(), band_b.shape())?;
-    let a_view = band_a.readonly();
-    let b_view = band_b.readonly();
-    let a_arr = a_view.as_array();
-    let b_arr = b_view.as_array();
-
-    let dims = band_a.shape();
-    // CHANGED: zeros_bound -> zeros
-    let out_buffer = PyArray2::<f32>::zeros(py, [dims[0], dims[1]], false);
-    
-    let mut out_write = out_buffer.readwrite();
-    let out_view = out_write.as_array_mut();
-
-    py.allow_threads(move || compute_logic(a_arr, b_arr, out_view));
-    Ok(out_buffer)
+    let shape = band_a.shape();
+    let out = PyArray2::<f32>::zeros(py, [shape[0], shape[1]], false);
+    // Use clone() to pass the Bound handles safely
+    calculate_normalized_difference_inplace(py, band_a.clone(), band_b.clone(), out.clone())?;
+    Ok(out)
 }
 
 #[pymodule]
 fn geodium(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    init_hardware_optimization();
+    init_rayon();
     m.add_function(wrap_pyfunction!(calculate_normalized_difference_inplace, m)?)?;
-    m.add_function(wrap_pyfunction!(calculate_normalized_difference_lut_inplace, m)?)?;
+    m.add_function(wrap_pyfunction!(calculate_ratio_inplace, m)?)?;
+    m.add_function(wrap_pyfunction!(calculate_adjusted_difference_inplace, m)?)?;
+    m.add_function(wrap_pyfunction!(calculate_evi_inplace, m)?)?;
     m.add_function(wrap_pyfunction!(calculate_normalized_difference, m)?)?;
     m.add_function(wrap_pyfunction!(compile_expr, m)?)?;
     m.add_function(wrap_pyfunction!(execute_expr_inplace, m)?)?;

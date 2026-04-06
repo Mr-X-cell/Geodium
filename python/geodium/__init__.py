@@ -4,44 +4,74 @@ geodium
 High-performance Rust-backed geospatial math engine.
 """
 
-# ALWAYS load the core Rust math functions. 
+from __future__ import annotations
+import importlib
+
+# 1. CORE RUST ATTACHMENTS
+# These are lightweight and always loaded to ensure the binary is linked correctly.
 from .geodium import (
     calculate_normalized_difference,
     calculate_normalized_difference_inplace,
-    calculate_normalized_difference_lut_inplace,
     compile_expr,
     execute_expr_inplace,
     CompiledExpr
 )
 
+# 2. COMPONENT MAPPING
+# Map public names to the internal modules they live in for lazy loading.
+_LAZY_EXPORTS = {
+    # lazy.py
+    "LazyBand": ".lazy",
+    "LazyNode": ".lazy",
+    "LazyScalar": ".lazy",
+    
+    # geospatial_image.py
+    "GeospatialImage": ".geospatial_image",
+    "Collection": ".geospatial_image",
+    
+    # expr_engine.py
+    "LazyIndex": ".expr_engine",
+    "compile_index": ".expr_engine",
+    "execute_index": ".expr_engine",
+    "compute_index": ".expr_engine",
+}
+
+# 3. PUBLIC API DEFINITION
 __all__ = [
+    # Rust Core
     "calculate_normalized_difference",
     "calculate_normalized_difference_inplace",
     "calculate_normalized_difference_lut_inplace",
     "compile_expr",
     "execute_expr_inplace",
     "CompiledExpr",
+    # Lazy/DAG Engine
+    "LazyBand",
+    "LazyNode",
+    "LazyScalar",
+    "LazyIndex",
+    # Imagery API
+    "GeospatialImage",
+    "Collection",
+    # Formula Engine
+    "compile_index",
+    "compute_index",
 ]
 
-# LAZY LOAD the Python wrappers.
+# 4. LAZY LOAD IMPLEMENTATION
 def __getattr__(name: str):
-    # Route for lazy.py
-    if name in ("LazyBand", "LazyNode", "LazyScalar"):
-        from .lazy import LazyBand, LazyNode, LazyScalar
-        if name == "LazyBand": return LazyBand
-        if name == "LazyNode": return LazyNode
-        if name == "LazyScalar": return LazyScalar
-
-    # Route for geospatial_image.py
-    if name in ("GeospatialImage", "Collection"):
-        from .geospatial_image import GeospatialImage, Collection
-        return GeospatialImage if name == "GeospatialImage" else Collection
-
-    # Route for expr_engine.py
-    if name in ("compile_index", "execute_index", "compute_index"):
-        from .expr_engine import compile_index, execute_index, compute_index
-        if name == "compile_index": return compile_index
-        if name == "execute_index": return execute_index
-        if name == "compute_index": return compute_index
+    """
+    Dynamically imports components only when they are accessed.
+    This keeps the initial 'import geodium' extremely fast.
+    """
+    if name in _LAZY_EXPORTS:
+        module_path = _LAZY_EXPORTS[name]
+        # import_module uses the relative path (e.g., .lazy) 
+        # relative to this package (geodium)
+        module = importlib.import_module(module_path, __package__)
+        export = getattr(module, name)
+        # Cache the result in the module's globals to avoid re-importing
+        globals()[name] = export
+        return export
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
