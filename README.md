@@ -9,7 +9,7 @@ NDVI=geodium.calculate_normalized_difference_inplace(nir_arr, red_arr, out_buf)
 ```
 
 # Method 2 Geospatial module
-The GeospatialImage module allows the user to process data from a tiff Image, and to do a specific premade function on it. THe following satelite collections have been added LANDSAT_8_9,SENTINEL_2,NAIP, and PLANET. Currently the only two equations are `.ndvi` and `.ndwi`
+The GeospatialImage module allows the user to process data from a .tiff Image, and to do a specific premade function on it. THe following satelite collections have been added LANDSAT_8_9,SENTINEL_2,NAIP, and PLANET. Currently the only two equations are premade this way `.ndvi` and `.ndwi`
 ```
 from geodium import GeospatialImage, Collection
 tiff = GeospatialImage("./path to input tiff")
@@ -23,7 +23,7 @@ from geodium import compute_index
 compute_index("NDVI", {"N": nir_arr, "R": red_arr}, out_buf) 
 ```
 # Method 4 Lazy equations
-If a user requires an equation that is not in the premade functions or a spyndex eqaution they can use the built in lazy compiler for math equations to run the expression. The `Lazyband()` function imports the bands into the equation loader.
+If a user requires an equation that is not in the premade functions or a spyndex eqaution they can use the built in lazy compiler for math equations to run the expression. The `Lazyband()` function imports the bands into the equation loader and the `.save()` function computes it to an output tif.
 
 ```
 from geodium import LazyBand
@@ -35,9 +35,10 @@ OSAVI.save("./path to output")
 Lazy loading can also be done through the `LazyIndex()` which will lazy load a precompiled spyndex formula.
 ```
 from geodium import LazyIndex, Lazyband
-        evi_node = LazyIndex("EVI", {
-            "N": LazyBand("input.tiff", 4),
-            "R": LazyBand("input.tiff", 3),
-            "B": LazyBand("input.tiff", 1)
-        })
+evi_node = LazyIndex("EVI", {
+    "N": LazyBand("input.tiff", 4),
+    "R": LazyBand("input.tiff", 3),
+    "B": LazyBand("input.tiff", 1)
+})
+evi_node.save("output.tiff")
 ```

@@ -41,7 +41,6 @@ __all__ = [
     # Rust Core
     "calculate_normalized_difference",
     "calculate_normalized_difference_inplace",
-    "calculate_normalized_difference_lut_inplace",
     "compile_expr",
     "execute_expr_inplace",
     "CompiledExpr",

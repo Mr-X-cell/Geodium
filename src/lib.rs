@@ -225,7 +225,7 @@ fn execute_expr_inplace<'py>(
         // FIXED: Zip::indexed(view) is the correct starting associated function
         Zip::indexed(out_view)
             .par_for_each(|(r, c), out_val| {
-                let mut stack = [0.0f32; 16];
+                let mut stack = [0.0f32; 64];
                 let mut sp = 0;
                 for instr in &program {
                     match instr {
@@ -258,7 +258,6 @@ pub fn calculate_normalized_difference<'py>(
 ) -> PyResult<Bound<'py, PyArray2<f32>>> {
     let shape = band_a.shape();
     let out = PyArray2::<f32>::zeros(py, [shape[0], shape[1]], false);
-    // Use clone() to pass the Bound handles safely
     calculate_normalized_difference_inplace(py, band_a.clone(), band_b.clone(), out.clone())?;
     Ok(out)
 }

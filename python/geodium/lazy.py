@@ -23,19 +23,22 @@ class LazyNode:
     def compile_graph(self, state: dict):
         raise NotImplementedError
 
-    def save(self, output_path: str, tile_size: int = 4096):
+    def save(self, output_path: str):
+        """
+        Compiles the DAG and executes it via the concurrent I/O pipeline.
+        The pipeline automatically detects optimal block sizes from source files.
+        """
         state = {"instructions": [], "unique_bands": [], "band_sources": []}
         self.compile_graph(state)
         
         # Compile instructions to Rust Bytecode
         compiled_expr = geodium.compile_expr(state["instructions"], len(state["unique_bands"]))
         
-        # Dispatch to the unified pipeline
+        # Dispatch to the optimized concurrent pipeline
         run_concurrent_pipeline(
             output_path=output_path,
             band_sources=state["band_sources"],
-            compiled_expr=compiled_expr,
-            tile_size=tile_size
+            compiled_expr=compiled_expr
         )
 
 class LazyBand(LazyNode):
